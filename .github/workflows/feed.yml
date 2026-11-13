@@ -1,0 +1,64 @@
+name: Build and publish package feed
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+env:
+  SDK: aarch64_cortex-a53-25.12.6   # matches the router (mediatek/filogic, OpenWrt 25.12.6)
+  PKGARCH: aarch64_cortex-a53
+  FEEDNAME: temperature
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Build package with the OpenWrt SDK
+        uses: openwrt/gh-action-sdk@v11
+        env:
+          ARCH: ${{ env.SDK }}
+          FEEDNAME: ${{ env.FEEDNAME }}
+          PACKAGES: luci-app-temperature
+          INDEX: 1
+          PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
+          NO_REFRESH_CHECK: 1
+          NO_SHFMT_CHECK: 1
+
+      - name: Assemble feed
+        run: |
+          feed="bin/packages/$PKGARCH/$FEEDNAME"
+          ls -la "$feed"
+          test -f "$feed/packages.adb"
+          mkdir -p site
+          cp "$feed"/*.apk "$feed"/packages.adb site/
+          cp luci-app-temperature-feed.pem site/
+          touch site/.nojekyll
+          ls -la site
+
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5

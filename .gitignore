@@ -1,0 +1,18 @@
+# OpenWrt build output
+*.ipk
+*.apk
+bin/
+build_dir/
+staging_dir/
+tmp/
+
+# Editors / OS
+*.swp
+*~
+.vscode/
+.idea/
+.DS_Store
+
+# Signing keys (the private key lives only in the PRIVATE_KEY Actions secret)
+private-key.pem
+*.key
