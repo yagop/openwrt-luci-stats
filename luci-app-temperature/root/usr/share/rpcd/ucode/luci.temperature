@@ -89,22 +89,33 @@ const methods = {
 			const sensors = [];
 			const fans = [];
 
+			const seen = {};
+
 			for (let hwdir in glob('/sys/class/hwmon/hwmon*')) {
 				const hwname = rd(hwdir + '/name') ?? basename(hwdir);
+				const inputs = glob(hwdir + '/temp*_input');
+				const d0 = length(inputs) ? describe(hwname, hwdir, sfpmap) : null;
 
-				for (let input in glob(hwdir + '/temp*_input')) {
+				for (let input in inputs) {
 					const base = replace(input, /_input$/, '');
 					const temp = milli(input);
 					if (temp == null)
 						continue;
 
-					const d = describe(hwname, hwdir, sfpmap);
+					const d = { ...d0 };
 					const lbl = rd(base + '_label');
 					const idx = match(base, /temp(\d+)$/)[1];
 
 					// Only qualify the label for multi-sensor chips with meaningful labels
-					if (lbl && lbl != 'temperature' && length(glob(hwdir + '/temp*_input')) > 1)
+					if (lbl && lbl != 'temperature' && length(inputs) > 1)
 						d.label += ' ' + lbl;
+
+					// Key on the chip name, not hwmonN: the kernel reuses hwmonN
+					// numbers, so an SFP swap could inherit another sensor's id.
+					let id = hwname + '_temp' + idx;
+					if (seen[id])
+						id += '_' + basename(hwdir);
+					seen[id] = true;
 
 					let max = milli(base + '_max');
 					let crit = milli(base + '_crit');
@@ -123,7 +134,7 @@ const methods = {
 					}
 
 					push(sensors, {
-						id: basename(hwdir) + '_temp' + idx,
+						id: id,
 						name: hwname,
 						kind: d.kind,
 						label: d.label,

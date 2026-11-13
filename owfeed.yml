@@ -1,0 +1,36 @@
+# yaml-language-server: $schema=https://owfeed.org/schema/v1.json
+# Reference: https://github.com/owfeed/owfeed/blob/main/docs/examples.md
+version: 1
+
+feed:
+  name: yagop
+  # The address apk fetches; GitHub Pages serves it without a redirect.
+  url: https://yagop.github.io/openwrt-luci-stats
+  title: openwrt-luci-stats
+  maintainer: "Yago <5002453+yagop@users.noreply.github.com>"
+  homepage: https://github.com/yagop/openwrt-luci-stats
+  license: Apache-2.0
+
+publish:
+  - target: github-pages
+
+# apk only: the view relies on OpenWrt 25.12's LuCI and rpcd ucode plugins.
+releases:
+  - line: "25.12"
+    default: true
+    format: apk
+
+packages:
+  - name: luci-app-temperature
+    build: mkpkg
+    arch: noarch
+    # Bump on every change: apk upgrades only to a higher version.
+    version: 1.1.0-r1
+    files: ./luci-app-temperature/root
+    description: "Realtime temperature graphs in LuCI for CPU, SFP/PON modules and Wi-Fi radios"
+    depends: [luci-base, rpcd-mod-ucode]
+    conffiles: []
+    license: Apache-2.0
+    url: https://github.com/yagop/openwrt-luci-stats
+    scripts:
+      post-deinstall: ./luci-app-temperature/scripts/post-deinstall

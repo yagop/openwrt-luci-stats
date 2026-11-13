@@ -1,0 +1,7 @@
+#!/bin/sh
+# Run once by the package's post-install: make LuCI rebuild its menu and
+# rpcd load the new ubus object (luci.temperature) and ACL.
+rm -f /tmp/luci-indexcache*
+rm -rf /tmp/luci-modulecache/
+/etc/init.d/rpcd reload
+exit 0
