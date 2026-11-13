@@ -2,8 +2,8 @@ name: Feed
 
 # Builds luci-app-temperature with owfeed, smoke-installs it on a real
 # OpenWrt 25.12 image, and publishes the signed apk feed to GitHub Pages.
-# The signing key (OWFEED_SIGN_KEY) is a secret of the `feed` environment,
-# which only the reusable workflow's publish job declares.
+# The signing key is the OWFEED_SIGN_KEY repository secret, handed only to the
+# reusable workflow's publish job, which runs in the `feed` environment.
 
 on:
   push:
@@ -21,7 +21,12 @@ jobs:
       actions: read
     # Pinned to the commit of v0.5.8: a tag can be moved, a commit cannot.
     uses: owfeed/owfeed/.github/workflows/feed.yml@bae7f337a0174a10420ab1e0cc3573cd2a660c35 # v0.5.8
-    secrets: inherit          # lets the publish job read the environment's key
+    # An OWFEED_SIGN_KEY secret of the `feed` environment never reached the
+    # called workflow's publish job (it ran in `feed`, the key was empty), so
+    # the key is a repository secret passed explicitly, owfeed's documented
+    # fallback. The publish job still runs in `feed`, which only main may use.
+    secrets:
+      sign-key: ${{ secrets.OWFEED_SIGN_KEY }}
     with:
       runs-on: ubuntu-24.04
       smoke-releases: "25.12"

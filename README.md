@@ -74,4 +74,5 @@ Check locally before pushing:
 owfeed check    # build, sign, index and doctor on throwaway keys
 ```
 
-The signing key lives only in the `OWFEED_SIGN_KEY` secret of the `feed` environment.
+The signing key lives only in the `OWFEED_SIGN_KEY` repository secret; the workflow passes it to
+owfeed's publish job, which runs in the `feed` environment (deployable from `main` only).
