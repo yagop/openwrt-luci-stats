@@ -1,0 +1,12 @@
+#!/bin/sh
+# Stop the collector, drop its RRDs, and release the ubus object after removal.
+# The init script is already gone here, so stop the procd instance over ubus
+# and remove the boot symlink that "enable" created.
+[ -n "$IPKG_INSTROOT" ] && exit 0
+ubus call service delete '{"name":"luci-temperature-history"}' 2>/dev/null
+rm -f /etc/rc.d/S95luci-temperature-history /etc/rc.d/K10luci-temperature-history
+rm -rf /tmp/luci-temperature-rrd
+rm -f /tmp/luci-indexcache*
+rm -rf /tmp/luci-modulecache/
+/etc/init.d/rpcd reload
+exit 0

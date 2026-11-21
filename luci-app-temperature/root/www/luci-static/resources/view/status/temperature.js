@@ -5,7 +5,14 @@
 
 /*
  * Realtime temperature cards: one card per hwmon temperature sensor.
- * History is kept client-side only, for as long as the view is open.
+ *
+ * Live (10 min) history is kept client-side, for as long as the view is open.
+ * If luci-app-temperature-history is installed, its ubus object
+ * (luci.temperature.history) is detected at load time and a range selector
+ * appears (1 h / 6 h / 24 h), served from RRD files on the router. Without
+ * that package the object is absent, the selector is hidden and the view
+ * behaves exactly as the live-only version.
+ *
  * Styling follows the LuCI app styling guide (theme export tokens only,
  * names prefixed with the package name, style returned inside the view tree).
  *
@@ -19,16 +26,86 @@ const callSensors = rpc.declare({
 	expect: { '': {} }
 });
 
-const POLL_INTERVAL = 3;            // seconds
-const WINDOW = 600;                 // seconds of history shown
-const GAP = POLL_INTERVAL * 2.5;    // seconds between samples that break the line
+const callHistory = rpc.declare({
+	object: 'luci.temperature.history',
+	method: 'getHistory',
+	params: [ 'range' ],
+	expect: { '': {} }
+});
+
+const POLL_INTERVAL = 3;            // seconds between live polls
+const LIVE_WINDOW = 600;            // seconds of live history shown
+const HISTORY_REFRESH = 30;         // seconds between getHistory refreshes
+const LIVE_GAP = POLL_INTERVAL * 2.5;   // seconds between samples that break the live line
 const MISS_LIMIT = 3;               // polls a sensor may be missing before its card goes
 const GRAPH_HEIGHT = 120;           // px
 const SVGNS = 'http://www.w3.org/2000/svg';
 const P = 'luci-app-temperature';   // prefix for every class name
 
+/* key is stable; label is built with _() at render time */
+const RANGES = [
+	{ key: 'live', window: LIVE_WINDOW, live: true },
+	{ key: '1h',   window: 3600 },
+	{ key: '6h',   window: 21600 },
+	{ key: '24h',  window: 86400 }
+];
+
+function rangeLabel(key) {
+	switch (key) {
+	case 'live': return _('Live');
+	case '1h':   return _('1 h');
+	case '6h':   return _('6 h');
+	case '24h':  return _('24 h');
+	default:     return key;
+	}
+}
+
+function agoLabel(window) {
+	return window >= 3600
+		? _('%d h ago').format(window / 3600)
+		: _('%d min ago').format(window / 60);
+}
+
+/* seconds between vertical gridlines for a given window */
+function timeStep(window) {
+	if (window <= 600)   return 120;
+	if (window <= 3600)  return 600;
+	if (window <= 21600) return 3600;
+	return 14400;
+}
+
 const CSS = `
 .${P}-root { container-type: inline-size; }
+.${P}-controls {
+	display: flex;
+	flex-wrap: wrap;
+	gap: .5rem;
+	align-items: center;
+	margin-bottom: 1rem;
+}
+.${P}-controls:empty { display: none; }
+.${P}-controls-label { font-size: .85em; color: var(--text-color-medium, #666); }
+.${P}-range {
+	display: inline-flex;
+	border: 1px solid var(--border-color-medium, #ddd);
+	border-radius: 6px;
+	overflow: hidden;
+}
+.${P}-range button {
+	appearance: none;
+	border: 0;
+	border-left: 1px solid var(--border-color-medium, #ddd);
+	padding: .3em .8em;
+	font: inherit;
+	cursor: pointer;
+	background: var(--background-color-high, #fff);
+	color: var(--text-color-high, #333);
+}
+.${P}-range button:first-child { border-left: 0; }
+.${P}-range button[aria-pressed="true"] {
+	background: var(--primary-color-high, #1976d2);
+	color: var(--on-primary-color, #fff);
+}
 .${P}-grid {
 	display: grid;
 	grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
@@ -173,12 +250,12 @@ function sortSensors(a, b) {
 	return String(a.label || '').localeCompare(String(b.label || ''));
 }
 
-/* Split history into runs with no gap longer than GAP seconds */
-function segments(hist) {
+/* Split history into runs with no gap longer than `gap` seconds */
+function segments(hist, gap) {
 	const runs = [];
 	let run = [];
 	for (let i = 0; i < hist.length; i++) {
-		if (run.length && hist[i][0] - hist[i - 1][0] > GAP) {
+		if (run.length && hist[i][0] - hist[i - 1][0] > gap) {
 			runs.push(run);
 			run = [];
 		}
@@ -195,13 +272,32 @@ return view.extend({
 	handleReset: null,
 
 	known: null,        // id -> { sensor, missed }: sensors shown, incl. briefly missing ones
-	hist: null,         // id -> [[ts, temp], ...]; outlives cards, so a hiccup keeps history
+	hist: null,         // id -> [[ts, temp], ...]; live buffer, outlives cards
+	histData: null,     // id -> [[ts, temp], ...]; server history (averages) for the chosen range
+	histExt: null,      // id -> { min, max }; true extremes over the range, from MIN/MAX archives
+	histStep: 30,       // seconds between server history samples
+	histReq: 0,         // id of the latest getHistory request; older replies are dropped
 	cards: null,        // id -> card context
 	idKey: null,        // joined ids of the cards currently shown
 	now: 0,             // latest server timestamp
+	rangeIdx: 0,        // index into RANGES
+	window: LIVE_WINDOW,// seconds of history currently graphed
+	hasHistory: false,  // luci.temperature.history present
+	lastHistFetch: 0,   // ms of the last getHistory refresh
 
 	load() {
 		return L.resolveDefault(callSensors(), {});
+	},
+
+	live() {
+		return RANGES[this.rangeIdx].live;
+	},
+
+	/* The series drawn for a sensor: live client buffer or server history */
+	histFor(id) {
+		/* getHistory keys its series by the sensor id itself (it decodes the
+		   RRD file names), so both sources are looked up the same way */
+		return (this.live() ? this.hist[id] : this.histData?.[id]) || [];
 	},
 
 	buildCard(s) {
@@ -213,6 +309,7 @@ return view.extend({
 		ctx.value = E('span', {}, [ '-' ]);
 		ctx.svg = svgEl('svg', { 'role': 'img', 'aria-label': _('Temperature history') });
 		ctx.stats = E('div', { 'class': P + '-stats' });
+		ctx.ago = E('span', {}, [ agoLabel(this.window) ]);
 
 		ctx.node = E('div', { 'class': P + '-card', 'data-state': 'ok' }, [
 			E('div', { 'class': P + '-head' }, [
@@ -225,7 +322,7 @@ return view.extend({
 			]),
 			E('div', { 'class': P + '-graph' }, [ ctx.svg ]),
 			E('div', { 'class': P + '-time' }, [
-				E('span', {}, [ _('%d min ago').format(WINDOW / 60) ]),
+				ctx.ago,
 				E('span', {}, [ _('now') ])
 			]),
 			ctx.stats
@@ -261,9 +358,11 @@ return view.extend({
 			if (!present[id] && ++this.known[id].missed > MISS_LIMIT)
 				delete this.known[id];
 
+		/* Live buffer is always a rolling LIVE_WINDOW, independent of the
+		   graphed range (which may be served from RRD instead). */
 		for (const id in this.hist) {
 			const hist = this.hist[id];
-			while (hist.length && hist[0][0] < now - WINDOW)
+			while (hist.length && hist[0][0] < now - LIVE_WINDOW)
 				hist.shift();
 			if (!hist.length && !this.known[id])
 				delete this.hist[id];
@@ -298,17 +397,21 @@ return view.extend({
 
 	updateCard(ctx) {
 		const s = ctx.sensor;
-		const hist = this.hist[ctx.id] || [];
+		const hist = this.histFor(ctx.id);
 		const state = sensorState(s, ctx.stale);
 		const temps = hist.map(h => h[1]);
-		const min = temps.length ? Math.min(...temps) : s.temp;
-		const peak = temps.length ? Math.max(...temps) : s.temp;
+		/* The server curve holds 5-minute averages for 6 h / 24 h, which hide
+		   short spikes; Min and Peak come from the RRD's MIN/MAX archives. */
+		const ext = this.live() ? null : this.histExt?.[ctx.id];
+		const min = (ext?.min != null) ? ext.min : (temps.length ? Math.min(...temps) : s.temp);
+		const peak = (ext?.max != null) ? ext.max : (temps.length ? Math.max(...temps) : s.temp);
 		const avg = temps.length ? temps.reduce((a, b) => a + b, 0) / temps.length : NaN;
 
 		ctx.node.setAttribute('data-state', state);
 		ctx.pill.setAttribute('data-state', state);
 		ctx.pill.textContent = stateLabel(state);
 		ctx.value.textContent = ctx.stale ? '-' : fmt(s.temp);
+		ctx.ago.textContent = agoLabel(this.window);
 
 		const stats = [
 			E('span', {}, [ _('Min') + ' ', E('strong', {}, [ fmt(temps.length ? min : NaN) + ' °C' ]) ]),
@@ -332,6 +435,10 @@ return view.extend({
 		const W = svg.clientWidth || svg.parentNode?.clientWidth || 0;
 		const H = GRAPH_HEIGHT;
 		const s = ctx.sensor;
+		const window = this.window;
+		/* Server rows are exactly histStep apart and UNKNOWN rows are dropped,
+		   so any wider interval is a missing bucket and must break the line. */
+		const gap = (this.live() ? LIVE_GAP : this.histStep * 1.5);
 
 		if (!W || !isFinite(min) || !isFinite(peak))
 			return;   /* not attached yet, or nothing to scale to; drawn on next update */
@@ -349,7 +456,7 @@ return view.extend({
 
 		const step = (hi - lo) > 30 ? 10 : 5;
 		const y = t => H - (t - lo) / (hi - lo) * H;
-		const x = ts => W * (1 - (this.now - ts) / WINDOW);
+		const x = ts => W * (1 - (this.now - ts) / window);
 
 		svg.setAttribute('viewBox', '0 0 %d %d'.format(W, H));
 		svg.replaceChildren();
@@ -363,9 +470,10 @@ return view.extend({
 			svg.appendChild(label);
 		}
 
-		for (let m = 2; m < WINDOW / 60; m += 2) {
-			const xm = W * (1 - m * 60 / WINDOW);
-			svg.appendChild(svgEl('line', { 'class': P + '-gridline', x1: xm, x2: xm, y1: 0, y2: H }));
+		const tstep = timeStep(window);
+		for (let t = tstep; t < window; t += tstep) {
+			const xt = W * (1 - t / window);
+			svg.appendChild(svgEl('line', { 'class': P + '-gridline', x1: xt, x2: xt, y1: 0, y2: H }));
 		}
 
 		const limits = [
@@ -386,7 +494,7 @@ return view.extend({
 
 		/* One line per run of samples, so a gap (failed poll, background tab)
 		   is not drawn as a straight line that looks like data */
-		for (const run of segments(hist)) {
+		for (const run of segments(hist, gap)) {
 			const pts = run.map(h => '%.1f,%.1f'.format(x(h[0]), y(h[1])));
 			if (pts.length >= 2) {
 				const x0 = x(run[0][0]).toFixed(1), xn = x(run[run.length - 1][0]).toFixed(1);
@@ -400,13 +508,77 @@ return view.extend({
 		}
 	},
 
+	/* Pull the chosen range from the router, then redraw every card */
+	loadHistory() {
+		const req = ++this.histReq;
+		this.lastHistFetch = Date.now();
+		return L.resolveDefault(callHistory(this.window), null).then(L.bind(function(d) {
+			/* A reply for a range that is no longer selected (or overtaken by a
+			   newer request) would draw the wrong interval: drop it. */
+			if (req != this.histReq || this.live())
+				return;
+			this.histData = (d && d.series) ? d.series : {};
+			this.histExt = (d && d.extrema) ? d.extrema : {};
+			this.histStep = (d && d.step) ? d.step : 30;
+			for (const id in this.cards)
+				this.updateCard(this.cards[id]);
+		}, this));
+	},
+
+	setRange(idx) {
+		if (idx == this.rangeIdx)
+			return;
+		this.rangeIdx = idx;
+		this.window = RANGES[idx].window;
+
+		for (const b of this.rangeButtons)
+			b.setAttribute('aria-pressed', b.dataset.idx == idx ? 'true' : 'false');
+
+		/* Never draw the previous range's series under the new axis while the
+		   new one loads, and orphan any request still in flight. */
+		this.histReq++;
+		this.histData = {};
+		this.histExt = {};
+
+		if (this.live()) {
+			for (const id in this.cards)
+				this.updateCard(this.cards[id]);
+		}
+		else {
+			this.loadHistory();
+		}
+	},
+
+	buildControls() {
+		this.rangeButtons = RANGES.map((r, idx) => {
+			const b = E('button', {
+				'type': 'button',
+				'data-idx': idx,
+				'aria-pressed': idx == this.rangeIdx ? 'true' : 'false',
+				'click': L.bind(this.setRange, this, idx)
+			}, [ rangeLabel(r.key) ]);
+			return b;
+		});
+
+		this.controls.replaceChildren(
+			E('span', { 'class': P + '-controls-label' }, [ _('Range') ]),
+			E('div', { 'class': P + '-range' }, this.rangeButtons)
+		);
+	},
+
 	render(data) {
 		this.known = {};
 		this.hist = {};
+		this.histData = {};
+		this.histExt = {};
+		this.histReq = 0;
 		this.cards = {};
 		this.idKey = null;
 		this.now = 0;
+		this.rangeIdx = 0;
+		this.window = LIVE_WINDOW;
 
+		this.controls = E('div', { 'class': P + '-controls' });
 		this.grid = E('div', { 'class': P + '-grid' });
 		this.fans = E('div', { 'class': P + '-footer' });
 
@@ -417,15 +589,25 @@ return view.extend({
 				_('Live readings of all hardware temperature sensors, including SFP/PON modules. Dashed lines mark each sensor\'s warning and critical limits.')
 			]),
 			E('div', { 'class': 'cbi-section' }, [
+				this.controls,
 				this.grid,
 				this.fans,
 				E('div', { 'class': P + '-footer' }, [
-					_('(%d minute window, %d second interval; history starts when this page is opened)').format(WINDOW / 60, POLL_INTERVAL)
+					_('(%d minute live window, %d second interval)').format(LIVE_WINDOW / 60, POLL_INTERVAL)
 				])
 			])
 		]);
 
 		this.update(data);
+
+		/* Detect the history backend (luci-app-temperature-history); show the
+		   range selector only when its ubus object answers. */
+		L.resolveDefault(callHistory(LIVE_WINDOW), null).then(L.bind(function(d) {
+			if (d && d.series) {
+				this.hasHistory = true;
+				this.buildControls();
+			}
+		}, this));
 
 		/* first draw once the view is attached and has a width */
 		requestAnimationFrame(() => {
@@ -437,6 +619,10 @@ return view.extend({
 			return L.resolveDefault(callSensors(), null).then(L.bind(function(d) {
 				if (d)
 					this.update(d);
+				/* refresh server history periodically while a range is selected */
+				if (this.hasHistory && !this.live() &&
+				    Date.now() - this.lastHistFetch >= HISTORY_REFRESH * 1000)
+					this.loadHistory();
 			}, this));
 		}, this), POLL_INTERVAL);
 

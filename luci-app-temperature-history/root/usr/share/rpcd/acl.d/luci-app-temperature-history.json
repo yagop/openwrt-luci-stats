@@ -1,0 +1,10 @@
+{
+	"luci-app-temperature-history": {
+		"description": "Grant access to persisted temperature history",
+		"read": {
+			"ubus": {
+				"luci.temperature.history": [ "getHistory" ]
+			}
+		}
+	}
+}

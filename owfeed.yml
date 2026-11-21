@@ -25,7 +25,7 @@ packages:
     build: mkpkg
     arch: noarch
     # Bump on every change: apk upgrades only to a higher version.
-    version: 1.1.0-r1
+    version: 1.2.0-r1
     files: ./luci-app-temperature/root
     description: "Realtime temperature graphs in LuCI for CPU, SFP/PON modules and Wi-Fi radios"
     depends: [luci-base, rpcd-mod-ucode]
@@ -34,3 +34,20 @@ packages:
     url: https://github.com/yagop/openwrt-luci-stats
     scripts:
       post-deinstall: ./luci-app-temperature/scripts/post-deinstall
+
+  # Optional: 24 h temperature history (RRD on tmpfs, lost on reboot).
+  # Kept separate so the live-only view never pulls in rrdtool.
+  - name: luci-app-temperature-history
+    build: mkpkg
+    arch: noarch
+    # Bump on every change: apk upgrades only to a higher version.
+    version: 1.0.0-r1
+    files: ./luci-app-temperature-history/root
+    description: "24h temperature history (RRD on tmpfs) for luci-app-temperature"
+    # >= the release that ships the shared sensor module the collector imports.
+    depends: ["luci-app-temperature>=1.2.0-r1", rrdtool1, rpcd-mod-ucode]
+    conffiles: []
+    license: Apache-2.0
+    url: https://github.com/yagop/openwrt-luci-stats
+    scripts:
+      post-deinstall: ./luci-app-temperature-history/scripts/post-deinstall

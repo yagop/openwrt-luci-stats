@@ -1,0 +1,90 @@
+#!/usr/bin/ucode
+// Temperature history collector for luci-app-temperature-history.
+//
+// Samples the shared hwmon sensor set every STEP seconds and feeds each
+// sensor into its own round-robin RRD under RRD_DIR (tmpfs). Run as a
+// long-lived procd service; sleeps between cycles via popen('sleep').
+//
+// Retention (~24 h) and resolution come entirely from the RRAs below.
+// Everything lives on tmpfs, so a reboot starts the history fresh.
+
+'use strict';
+
+import { popen, mkdir, lsdir } from 'fs';
+import { collect } from 'luci.temperature.sensors';
+import { encode } from 'luci.temperature.rrdname';
+
+const RRD_DIR = '/tmp/luci-temperature-rrd';
+const RRD = '/usr/bin/rrdtool';
+const STEP = 30;        // seconds between samples (base RRD step)
+const HEARTBEAT = 90;   // a gap longer than this becomes UNKNOWN (3 * STEP)
+
+// Round-robin archives, ~24 h total on tmpfs, each kept as AVERAGE (the
+// curve) plus MIN and MAX (true extremes, which 5-minute averages hide):
+//   30 s x 240  = 2 h at full resolution
+//   5 min x 288 = 24 h
+const RRAS = [
+	'RRA:AVERAGE:0.5:1:240',
+	'RRA:MIN:0.5:1:240',
+	'RRA:MAX:0.5:1:240',
+	'RRA:AVERAGE:0.5:10:288',
+	'RRA:MIN:0.5:10:288',
+	'RRA:MAX:0.5:10:288'
+];
+
+function run(cmd) {
+	const p = popen(cmd);
+	if (!p)
+		return -1;
+	p.read('all');
+	return p.close();   // exit status
+}
+
+function nap(s) {
+	const p = popen('sleep ' + s);
+	if (p) {
+		p.read('all');
+		p.close();
+	}
+}
+
+function ensure(file, id) {
+	const rc = run(sprintf('%s create %s --step %d DS:t:GAUGE:%d:U:U %s 2>/dev/null',
+		RRD, file, STEP, HEARTBEAT, join(' ', RRAS)));
+	if (rc != 0)
+		warn(sprintf('luci-temperature-history: create failed for %s\n', id));
+	return rc == 0;
+}
+
+mkdir(RRD_DIR, 0755);
+
+// Track which RRDs already exist so we only ever create once.
+const have = {};
+for (let f in (lsdir(RRD_DIR) || []))
+	if (match(f, /\.rrd$/))
+		have[substr(f, 0, length(f) - 4)] = true;
+
+while (true) {
+	const snap = collect();
+
+	for (let s in snap.sensors) {
+		if (s.temp == null)
+			continue;
+
+		// Collision-free and limited to [A-Za-z0-9_]: safe as a file name and
+		// as a shell argument (see luci.temperature.rrdname).
+		const id = encode(s.id);
+		const file = RRD_DIR + '/' + id + '.rrd';
+
+		// A failed create is retried next cycle rather than marked done.
+		if (!have[id]) {
+			if (!ensure(file, id))
+				continue;
+			have[id] = true;
+		}
+
+		run(sprintf('%s update %s N:%.3f 2>/dev/null', RRD, file, s.temp));
+	}
+
+	nap(STEP);
+}
