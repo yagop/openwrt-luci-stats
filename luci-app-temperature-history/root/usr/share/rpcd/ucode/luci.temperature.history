@@ -3,13 +3,20 @@
 //
 //   ubus call luci.temperature.history getHistory '{ "range": 3600 }'
 //
-// Returns { step, series: { <sensor id>: [[ts, temp], ...] } }. Sensor
+// Returns
+//   { step,
+//     series:  { <sensor id>: [[ts, avg], ...] },
+//     extrema: { <sensor id>: { min, max } } }
+//
+// series is the curve (AVERAGE); extrema come from the MIN/MAX archives, so
+// a spike shorter than a 5-minute bucket still shows as the peak. Sensor
 // labels, limits and the current value come from luci.temperature; this
-// object only supplies the past curve.
+// object only supplies the past.
 
 'use strict';
 
 import { popen, lsdir } from 'fs';
+import { decode } from 'luci.temperature.rrdname';
 
 const RRD_DIR = '/tmp/luci-temperature-rrd';
 const RRD = '/usr/bin/rrdtool';
@@ -26,9 +33,9 @@ function clamp(n, lo, hi) {
 // "<timestamp>: <value>". Non-finite samples (UNKNOWN) are dropped.
 // -r is only a hint: rrdtool picks the RRA itself (a 6 h fetch is served
 // from the 5 min RRA), so the real step is taken from consecutive rows.
-function fetchSeries(file, range, res) {
-	const p = popen(sprintf('%s fetch %s AVERAGE -s -%d -r %d 2>/dev/null',
-		RRD, file, range, res));
+function fetchSeries(file, cf, range, res) {
+	const p = popen(sprintf('%s fetch %s %s -s -%d -r %d 2>/dev/null',
+		RRD, file, cf, range, res));
 	if (!p)
 		return { step: 0, rows: [] };
 
@@ -52,6 +59,15 @@ function fetchSeries(file, range, res) {
 	return { step: step, rows: series };
 }
 
+// Lowest / highest value of a MIN / MAX fetch, or null when it has none.
+function extreme(file, cf, range, res) {
+	let best = null;
+	for (let r in fetchSeries(file, cf, range, res).rows)
+		if (best == null || (cf == 'MIN' ? r[1] < best : r[1] > best))
+			best = r[1];
+	return best;
+}
+
 const methods = {
 	getHistory: {
 		args: { range: 0 },
@@ -59,18 +75,26 @@ const methods = {
 			const range = clamp(req.args?.range ?? 3600, 60, 86400);
 			const res = max(30, int(range / MAX_POINTS));
 			const series = {};
+			const extrema = {};
 			let step = 0;
 
 			for (let f in (lsdir(RRD_DIR) || [])) {
-				if (!match(f, /^[A-Za-z0-9_]+\.rrd$/))
+				const m = match(f, /^([A-Za-z0-9_]+)\.rrd$/);
+				const id = m ? decode(m[1]) : null;
+				if (id == null)
 					continue;
-				const id = substr(f, 0, length(f) - 4);
-				const r = fetchSeries(RRD_DIR + '/' + f, range, res);
+
+				const file = RRD_DIR + '/' + f;
+				const r = fetchSeries(file, 'AVERAGE', range, res);
 				series[id] = r.rows;
+				extrema[id] = {
+					min: extreme(file, 'MIN', range, res),
+					max: extreme(file, 'MAX', range, res)
+				};
 				step = max(step, r.step);
 			}
 
-			return { step: step || res, series: series };
+			return { step: step || res, series: series, extrema: extrema };
 		}
 	}
 };

@@ -12,26 +12,25 @@
 
 import { popen, mkdir, lsdir } from 'fs';
 import { collect } from 'luci.temperature.sensors';
+import { encode } from 'luci.temperature.rrdname';
 
 const RRD_DIR = '/tmp/luci-temperature-rrd';
 const RRD = '/usr/bin/rrdtool';
 const STEP = 30;        // seconds between samples (base RRD step)
 const HEARTBEAT = 90;   // a gap longer than this becomes UNKNOWN (3 * STEP)
 
-// Round-robin archives, ~24 h total on tmpfs:
+// Round-robin archives, ~24 h total on tmpfs, each kept as AVERAGE (the
+// curve) plus MIN and MAX (true extremes, which 5-minute averages hide):
 //   30 s x 240  = 2 h at full resolution
-//   5 min x 288 = 24 h averaged / peak
+//   5 min x 288 = 24 h
 const RRAS = [
 	'RRA:AVERAGE:0.5:1:240',
+	'RRA:MIN:0.5:1:240',
+	'RRA:MAX:0.5:1:240',
 	'RRA:AVERAGE:0.5:10:288',
+	'RRA:MIN:0.5:10:288',
 	'RRA:MAX:0.5:10:288'
 ];
-
-// sysfs-derived ids are already tame, but a sensor id becomes a filename and
-// a shell argument, so keep it to a safe charset no matter what.
-function safeId(id) {
-	return replace('' + id, /[^A-Za-z0-9_]/g, '_');
-}
 
 function run(cmd) {
 	const p = popen(cmd);
@@ -72,7 +71,9 @@ while (true) {
 		if (s.temp == null)
 			continue;
 
-		const id = safeId(s.id);
+		// Collision-free and limited to [A-Za-z0-9_]: safe as a file name and
+		// as a shell argument (see luci.temperature.rrdname).
+		const id = encode(s.id);
 		const file = RRD_DIR + '/' + id + '.rrd';
 
 		// A failed create is retried next cycle rather than marked done.

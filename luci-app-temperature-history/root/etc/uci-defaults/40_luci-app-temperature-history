@@ -6,5 +6,7 @@ rm -f /tmp/luci-indexcache*
 rm -rf /tmp/luci-modulecache/
 /etc/init.d/rpcd reload
 /etc/init.d/luci-temperature-history enable
-/etc/init.d/luci-temperature-history start
+# restart, not start: on an upgrade procd sees an unchanged instance
+# definition and would keep the old collector code running.
+/etc/init.d/luci-temperature-history restart
 exit 0

@@ -58,7 +58,8 @@ every 30 s into round-robin RRD files, and the page gains a **Live / 1 h / 6 h /
 apk add luci-app-temperature-history
 ```
 
-- **Retention:** 2 h at 30 s resolution, 24 h at 5 min (average and peak).
+- **Retention:** 2 h at 30 s resolution, 24 h at 5 min. Each keeps the average (the curve) and
+  the true minimum and maximum, so Min / Peak still catch a spike shorter than five minutes.
 - **Kept in RAM only** (`/tmp/luci-temperature-rrd`): nothing is written to flash, and the
   history starts over after a reboot or sysupgrade.
 - Pulls in `rrdtool1`, which is why it is a separate package.
@@ -88,6 +89,7 @@ Without it the page is unchanged: the selector only appears when the history ser
 | `etc/init.d/luci-temperature-history` | procd service running the collector |
 | `usr/libexec/luci-temperature-history/collect` | samples sensors every 30 s into RRDs on tmpfs |
 | `usr/share/rpcd/ucode/luci.temperature.history` | ubus backend: `getHistory` |
+| `usr/share/ucode/luci/temperature/rrdname.uc` | reversible sensor id ↔ RRD file name mapping |
 | `usr/share/rpcd/acl.d/luci-app-temperature-history.json` | read-only ACL for that one method |
 | `etc/uci-defaults/40_luci-app-temperature-history` | on install: reload rpcd, enable and start the collector |
 

@@ -273,8 +273,10 @@ return view.extend({
 
 	known: null,        // id -> { sensor, missed }: sensors shown, incl. briefly missing ones
 	hist: null,         // id -> [[ts, temp], ...]; live buffer, outlives cards
-	histData: null,     // id -> [[ts, temp], ...]; server history for the chosen range
+	histData: null,     // id -> [[ts, temp], ...]; server history (averages) for the chosen range
+	histExt: null,      // id -> { min, max }; true extremes over the range, from MIN/MAX archives
 	histStep: 30,       // seconds between server history samples
+	histReq: 0,         // id of the latest getHistory request; older replies are dropped
 	cards: null,        // id -> card context
 	idKey: null,        // joined ids of the cards currently shown
 	now: 0,             // latest server timestamp
@@ -293,9 +295,9 @@ return view.extend({
 
 	/* The series drawn for a sensor: live client buffer or server history */
 	histFor(id) {
-		/* RRD files are named after the id with the collector's safeId() applied */
-		return (this.live() ? this.hist[id]
-			: this.histData?.[String(id).replace(/[^A-Za-z0-9_]/g, '_')]) || [];
+		/* getHistory keys its series by the sensor id itself (it decodes the
+		   RRD file names), so both sources are looked up the same way */
+		return (this.live() ? this.hist[id] : this.histData?.[id]) || [];
 	},
 
 	buildCard(s) {
@@ -398,8 +400,11 @@ return view.extend({
 		const hist = this.histFor(ctx.id);
 		const state = sensorState(s, ctx.stale);
 		const temps = hist.map(h => h[1]);
-		const min = temps.length ? Math.min(...temps) : s.temp;
-		const peak = temps.length ? Math.max(...temps) : s.temp;
+		/* The server curve holds 5-minute averages for 6 h / 24 h, which hide
+		   short spikes; Min and Peak come from the RRD's MIN/MAX archives. */
+		const ext = this.live() ? null : this.histExt?.[ctx.id];
+		const min = (ext?.min != null) ? ext.min : (temps.length ? Math.min(...temps) : s.temp);
+		const peak = (ext?.max != null) ? ext.max : (temps.length ? Math.max(...temps) : s.temp);
 		const avg = temps.length ? temps.reduce((a, b) => a + b, 0) / temps.length : NaN;
 
 		ctx.node.setAttribute('data-state', state);
@@ -431,7 +436,9 @@ return view.extend({
 		const H = GRAPH_HEIGHT;
 		const s = ctx.sensor;
 		const window = this.window;
-		const gap = (this.live() ? LIVE_GAP : this.histStep * 2.5);
+		/* Server rows are exactly histStep apart and UNKNOWN rows are dropped,
+		   so any wider interval is a missing bucket and must break the line. */
+		const gap = (this.live() ? LIVE_GAP : this.histStep * 1.5);
 
 		if (!W || !isFinite(min) || !isFinite(peak))
 			return;   /* not attached yet, or nothing to scale to; drawn on next update */
@@ -503,9 +510,15 @@ return view.extend({
 
 	/* Pull the chosen range from the router, then redraw every card */
 	loadHistory() {
+		const req = ++this.histReq;
 		this.lastHistFetch = Date.now();
 		return L.resolveDefault(callHistory(this.window), null).then(L.bind(function(d) {
+			/* A reply for a range that is no longer selected (or overtaken by a
+			   newer request) would draw the wrong interval: drop it. */
+			if (req != this.histReq || this.live())
+				return;
 			this.histData = (d && d.series) ? d.series : {};
+			this.histExt = (d && d.extrema) ? d.extrema : {};
 			this.histStep = (d && d.step) ? d.step : 30;
 			for (const id in this.cards)
 				this.updateCard(this.cards[id]);
@@ -520,6 +533,12 @@ return view.extend({
 
 		for (const b of this.rangeButtons)
 			b.setAttribute('aria-pressed', b.dataset.idx == idx ? 'true' : 'false');
+
+		/* Never draw the previous range's series under the new axis while the
+		   new one loads, and orphan any request still in flight. */
+		this.histReq++;
+		this.histData = {};
+		this.histExt = {};
 
 		if (this.live()) {
 			for (const id in this.cards)
@@ -551,6 +570,8 @@ return view.extend({
 		this.known = {};
 		this.hist = {};
 		this.histData = {};
+		this.histExt = {};
+		this.histReq = 0;
 		this.cards = {};
 		this.idKey = null;
 		this.now = 0;
