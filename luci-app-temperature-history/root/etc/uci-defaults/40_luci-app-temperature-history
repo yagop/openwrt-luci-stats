@@ -1,0 +1,10 @@
+#!/bin/sh
+# Run once by the package's post-install: register the new ubus object and
+# ACL (luci.temperature.history), drop LuCI's caches so the view picks up the
+# history method, and start the collector.
+rm -f /tmp/luci-indexcache*
+rm -rf /tmp/luci-modulecache/
+/etc/init.d/rpcd reload
+/etc/init.d/luci-temperature-history enable
+/etc/init.d/luci-temperature-history start
+exit 0

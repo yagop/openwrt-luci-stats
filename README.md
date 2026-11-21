@@ -9,8 +9,9 @@ One card per hardware sensor, found automatically from `/sys/class/hwmon`:
 - **Wi-Fi radios** (mt79xx)
 - any other hwmon temperature sensor, plus fan PWM speed
 
-Each card shows the current value, a 10-minute graph (kept in the browser while the tab is open),
-min / avg / peak and the sensor's warning and critical limits. Styled only with theme colour tokens,
+Each card shows the current value, a 10-minute live graph (kept in the browser while the tab is open),
+min / avg / peak and the sensor's warning and critical limits. Install the optional
+[`luci-app-temperature-history`](#history) package for a 1 h / 6 h / 24 h range selector. Styled only with theme colour tokens,
 so it follows light/dark mode on any LuCI theme (built to the
 [footstrap app styling guide](https://github.com/VizzleTF/luci-theme-footstrap/blob/main/docs/luci-app-styling-guide.md)).
 
@@ -48,6 +49,23 @@ apk update && apk add luci-app-temperature
 
 > **Installing the key trusts this feed for every package name.** A key in `/etc/apk/keys` validates an index claiming any package name at all, so this feed could offer a higher version of a base package and win. Install it because you trust whoever publishes it, not because a page told you to.
 
+## History
+
+`luci-app-temperature-history` is optional. With it installed, a collector samples every sensor
+every 30 s into round-robin RRD files, and the page gains a **Live / 1 h / 6 h / 24 h** selector.
+
+```sh
+apk add luci-app-temperature-history
+```
+
+- **Retention:** 2 h at 30 s resolution, 24 h at 5 min (average and peak).
+- **Kept in RAM only** (`/tmp/luci-temperature-rrd`): nothing is written to flash, and the
+  history starts over after a reboot or sysupgrade.
+- Pulls in `rrdtool1`, which is why it is a separate package.
+- `ubus call luci.temperature.history getHistory '{"range":3600}'` returns the raw series.
+
+Without it the page is unchanged: the selector only appears when the history service answers.
+
 ## Layout
 
 `luci-app-temperature/root/` is the package payload, laid out exactly as it installs:
@@ -55,12 +73,25 @@ apk update && apk add luci-app-temperature
 | Path | Purpose |
 |---|---|
 | `www/luci-static/resources/view/status/temperature.js` | the page |
+| `usr/share/ucode/luci/temperature/sensors.uc` | sensor discovery, shared with the history collector |
 | `usr/share/rpcd/ucode/luci.temperature` | ubus backend: `ubus call luci.temperature getSensors` |
 | `usr/share/rpcd/acl.d/luci-app-temperature.json` | read-only ACL for that one method |
 | `usr/share/luci/menu.d/luci-app-temperature.json` | adds the tab; does not touch the stock graphs |
 | `etc/uci-defaults/40_luci-app-temperature` | on install/upgrade: clear LuCI's menu cache, reload rpcd |
 
 `luci-app-temperature/scripts/post-deinstall` does the same cleanup after removal.
+
+`luci-app-temperature-history/root/`:
+
+| Path | Purpose |
+|---|---|
+| `etc/init.d/luci-temperature-history` | procd service running the collector |
+| `usr/libexec/luci-temperature-history/collect` | samples sensors every 30 s into RRDs on tmpfs |
+| `usr/share/rpcd/ucode/luci.temperature.history` | ubus backend: `getHistory` |
+| `usr/share/rpcd/acl.d/luci-app-temperature-history.json` | read-only ACL for that one method |
+| `etc/uci-defaults/40_luci-app-temperature-history` | on install: reload rpcd, enable and start the collector |
+
+Its `scripts/post-deinstall` stops the collector and deletes the RRDs.
 
 ## Releasing
 
